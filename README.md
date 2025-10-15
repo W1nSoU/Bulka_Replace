@@ -18,7 +18,7 @@ pip install -r requirements.txt
 
 ### Запуск бота
 
-python3 bot.py
+python bot.py
 
 ### Зупинка бота
 
