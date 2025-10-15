@@ -1,0 +1,7 @@
+python-telegram-bot[job-queue]==13.15
+urllib3==1.26.18
+certifi==2023.7.22
+six==1.16.0
+APScheduler==3.6.3
+openpyxl==3.0.10
+Flask==2.1.3
