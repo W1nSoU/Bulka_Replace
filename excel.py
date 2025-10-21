@@ -61,10 +61,7 @@ def record_replacement_to_excel(reports_dir: str, replacement_data: dict):
             workbook = openpyxl.load_workbook(filepath)
             sheet = workbook.active
 
-        worker_username = replacement_data.get('replacement_worker_username')
         worker_id = replacement_data.get('replacement_worker_id')
-        
-        username_display = f"@{worker_username}" if worker_username else str(worker_id)
 
         row_data = [
             replacement_data.get('id'),
@@ -73,7 +70,7 @@ def record_replacement_to_excel(reports_dir: str, replacement_data: dict):
             replacement_data.get('position'),
             replacement_data.get('shop'),
             replacement_data.get('replacement_worker_full_name'),
-            username_display,
+            worker_id,
             datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         ]
         sheet.append(row_data)

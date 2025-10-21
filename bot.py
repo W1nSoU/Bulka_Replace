@@ -20,7 +20,7 @@ from telegram.error import BadRequest
 import database as db
 import excel
 from excel import MONTHS_UA
-from config import AVAILABLE_POSITIONS
+
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,10 +28,13 @@ logger = logging.getLogger(__name__)
 
 ASK_DATE, ASK_POSITION, ASK_SHOP = range(3)
 ADD_MANAGER_ID = range(3, 4)
+EMPLOYEE_MENU, ADD_EMPLOYEE_NAME, ADD_EMPLOYEE_ID, DELETE_EMPLOYEE_ID = range(4, 8)
 
 
 def get_main_keyboard(role: str) -> ReplyKeyboardMarkup:
     keyboard = [[KeyboardButton("Знайти заміну")]]
+    if role in ['developer', 'manager']:
+        keyboard.append([KeyboardButton("Працівники")])
     if role == 'developer':
         keyboard.append([KeyboardButton("Надіслати таблицю")])
         keyboard.append([KeyboardButton("Додати керівника"), KeyboardButton("Видалити керівника")])
@@ -80,7 +83,7 @@ def find_replacement_start(update: Update, context: CallbackContext) -> int:
         update.message.reply_text("❌ **Доступ заборонено.**\n\nВи більше не маєте прав створювати заявки.", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
         return ConversationHandler.END
 
-    update.message.reply_text("🗓️ **Крок 1/3: Дата**\n\nНа яку дату потрібна заміна?\nВведіть у форматі `ДД.ММ.РРРР`.", parse_mode='Markdown')
+    update.message.reply_text("🗓️ **Крок 1/3: Дата**\n\nНа яку дату потрібна заміна?\nВведіть у форматі `ДД.ММ.РРРР`.\n\n/cancel - скасувати", parse_mode='Markdown')
     return ASK_DATE
 
 def ask_date_handler(update: Update, context: CallbackContext) -> int:
@@ -93,7 +96,11 @@ def ask_date_handler(update: Update, context: CallbackContext) -> int:
             return ASK_DATE
 
         context.user_data['replacement_date'] = update.message.text
-        kb = [[InlineKeyboardButton(pos, callback_data=pos)] for pos in AVAILABLE_POSITIONS]
+        
+        config = context.bot_data['config']
+        available_positions = config.get('available_positions', [])
+        kb = [[InlineKeyboardButton(pos, callback_data=pos)] for pos in available_positions]
+        kb.append([InlineKeyboardButton("❌ Скасувати", callback_data="cancel_replacement")])
         update.message.reply_text(f"🧑‍🍳 **Крок 2/3: Посада**\n\nОберіть посаду для заміни:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         return ASK_POSITION
     except ValueError:
@@ -105,8 +112,10 @@ def ask_position_handler(update: Update, context: CallbackContext) -> int:
     shop_config = config['shop_config']
     query = update.callback_query
     query.answer()
+
     context.user_data['replacement_position'] = query.data
     kb = [[InlineKeyboardButton(name, callback_data=name)] for name in shop_config.keys()]
+    kb.append([InlineKeyboardButton("❌ Скасувати", callback_data="cancel_replacement")])
     query.edit_message_text(f"🏢 Крок 3/3: Магазин\n\nВи обрали посаду: **{query.data}**.\nТепер оберіть магазин:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return ASK_SHOP
 
@@ -125,6 +134,7 @@ def ask_shop_handler(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
     query.answer()
+        
     context.user_data['replacement_shop'] = query.data
     shop_name = context.user_data['replacement_shop']
 
@@ -178,6 +188,7 @@ def ask_shop_handler(update: Update, context: CallbackContext) -> int:
 def take_replacement_handler(update: Update, context: CallbackContext) -> None:
     config = context.bot_data['config']
     db_path = config['db_path']
+    employees_db_path = config['employees_db_path']
     reports_dir = config['reports_dir']
     query = update.callback_query
     user = update.effective_user
@@ -190,10 +201,13 @@ def take_replacement_handler(update: Update, context: CallbackContext) -> None:
 
     if repl_data and repl_data['status'] == 'pending':
         
-        db.take_replacement(db_path, repl_id, user.id, user.full_name, user.username)
+        employee_data = db.get_employee(employees_db_path, user.id)
+        worker_full_name = employee_data['full_name'] if employee_data else user.full_name
+        
+        db.take_replacement(db_path, repl_id, user.id, worker_full_name, user.username)
 
         
-        mention = f"@{user.username.replace('_', '\\_')}" if user.username else f"[{user.full_name}](tg://user?id={user.id})"
+        mention = f"@{user.username.replace('_', '\\_')}" if user.username else f"[{worker_full_name}](tg://user?id={user.id})"
 
         orig_msg_text = query.message.text
         details_part = orig_msg_text.split("📋 Деталі:")[1].split("💡 Натисніть")[0].strip()
@@ -212,7 +226,10 @@ def take_replacement_handler(update: Update, context: CallbackContext) -> None:
         full_details = db.get_full_replacement_details(db_path, repl_id)
         if full_details:
             
-            full_details['replacement_worker_full_name'] = user.full_name
+            employee_data = db.get_employee(employees_db_path, user.id)
+            worker_full_name = employee_data['full_name'] if employee_data else user.full_name
+
+            full_details['replacement_worker_full_name'] = worker_full_name
             full_details['replacement_worker_username'] = user.username
             full_details['replacement_worker_id'] = user.id
             excel.record_replacement_to_excel(reports_dir, full_details)
@@ -322,9 +339,121 @@ def scheduled_report_task(context: CallbackContext) -> None:
         
         
         month_name = excel.MONTHS_UA[prev_month_date.month]
-        
-        caption = f"📊 **Щомісячний звіт ({city_name})**\n\nОсь повний звіт по замінах за **{month_name}**."
+
+        caption = f"📊 Щомісячний звіт ({city_name})\n\nОсь повний звіт по замінах за {month_name}."
         send_and_delete(filepath, caption)
+
+def employees_menu_start(update: Update, context: CallbackContext) -> int:
+    """Показує головне меню управління працівниками."""
+    keyboard = [
+        [InlineKeyboardButton("➕ Додати працівника", callback_data="add_employee")],
+        [InlineKeyboardButton("➖ Видалити працівника", callback_data="delete_employee")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+    ]
+    update.message.reply_text("👤 Меню 'Працівники'\n\nОберіть дію:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return EMPLOYEE_MENU
+
+def employee_menu_handler(update: Update, context: CallbackContext) -> int:
+    """Обробляє вибір у меню працівників."""
+    query = update.callback_query
+    query.answer()
+    
+    if query.data == "add_employee":
+        query.edit_message_text("✍️ Додавання працівника\n\nВведіть Ім'я та Прізвище нового працівника.\n\n/cancel - скасувати")
+        return ADD_EMPLOYEE_NAME
+    elif query.data == "delete_employee":
+        return show_employees_for_deletion(update, context)
+    elif query.data == "back_to_main":
+        user = update.effective_user
+        config = context.bot_data['config']
+        db_path = config['db_path']
+        user_info = db.get_user(db_path, user.id)
+        query.edit_message_text("Ви повернулись у головне меню.")
+        update.effective_message.reply_text("Головне меню:", reply_markup=get_main_keyboard(user_info['role']))
+        return ConversationHandler.END
+
+def ask_employee_name_handler(update: Update, context: CallbackContext) -> int:
+    """Зберігає ім'я та прізвище і запитує ID."""
+    context.user_data['employee_full_name'] = update.message.text
+    update.message.reply_text(f"Чудово, ім'я {update.message.text} збережено.\n\nТепер введіть **Telegram ID** цього працівника.")
+    return ADD_EMPLOYEE_ID
+
+def ask_employee_id_handler(update: Update, context: CallbackContext) -> int:
+    """Зберігає ID і додає працівника в базу."""
+    config = context.bot_data['config']
+    employees_db_path = config['employees_db_path']
+    try:
+        user_id = int(update.message.text)
+        full_name = context.user_data['employee_full_name']
+        
+        db.add_employee(employees_db_path, user_id, full_name)
+        
+        update.message.reply_text(
+            f"✅ Працівника успішно додано!\n\n"
+            f"👤 Ім'я: {full_name}\n"
+            f"🆔 ID: `{user_id}`",
+            parse_mode='Markdown'
+        )
+        
+        user = update.effective_user
+        db_path = config['db_path']
+        user_info = db.get_user(db_path, user.id)
+        update.message.reply_text("Ви повернулись у головне меню.", reply_markup=get_main_keyboard(user_info['role']))
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    except ValueError:
+        update.message.reply_text("❗️ Помилка ID\n\nUser ID має складатися лише з цифр. Спробуйте ще раз.")
+        return ADD_EMPLOYEE_ID
+
+def show_employees_for_deletion(update: Update, context: CallbackContext) -> int:
+    """Показує список працівників для видалення."""
+    config = context.bot_data['config']
+    employees_db_path = config['employees_db_path']
+    employees = db.get_all_employees(employees_db_path)
+    
+    if not employees:
+        update.callback_query.edit_message_text("🤷‍♂️ Список порожній\n\nНаразі немає жодного працівника для видалення.")
+        user = update.effective_user
+        db_path = config['db_path']
+        user_info = db.get_user(db_path, user.id)
+        update.effective_message.reply_text("Ви повернулись у головне меню.", reply_markup=get_main_keyboard(user_info['role']))
+        return ConversationHandler.END
+
+    message_text = "👇 **Оберіть працівника для видалення** 👇\n\n"
+    for emp in employees:
+        message_text += f"• {emp['full_name']} (ID: `{emp['user_id']}`)\n"
+    
+    message_text += "\nНадішліть ID працівника, якого потрібно видалити."
+    
+    update.callback_query.edit_message_text(message_text, parse_mode='Markdown')
+    return DELETE_EMPLOYEE_ID
+
+def delete_employee_handler(update: Update, context: CallbackContext) -> int:
+    """Видаляє працівника за введеним ID."""
+    config = context.bot_data['config']
+    employees_db_path = config['employees_db_path']
+    try:
+        user_id_to_delete = int(update.message.text)
+        employee = db.get_employee(employees_db_path, user_id_to_delete)
+        
+        if employee:
+            db.delete_employee(employees_db_path, user_id_to_delete)
+            update.message.reply_text(f"✅ Працівника {employee['full_name']} (ID: {user_id_to_delete}) видалено!")
+        else:
+            update.message.reply_text("❌ Працівника не знайдено\n\nПеревірте ID і спробуйте ще раз.")
+            return DELETE_EMPLOYEE_ID
+
+        user = update.effective_user
+        db_path = config['db_path']
+        user_info = db.get_user(db_path, user.id)
+        update.message.reply_text("Ви повернулись у головне меню.", reply_markup=get_main_keyboard(user_info['role']))
+        return ConversationHandler.END
+        
+    except ValueError:
+        update.message.reply_text("❗️ Помилка ID\n\nUser ID має складатися лише з цифр. Спробуйте ще раз.")
+        return DELETE_EMPLOYEE_ID
+
 
 def run_bot(config: dict) -> None:
     """Налаштовує та запускає один екземпляр бота з заданою конфігурацією."""
@@ -344,22 +473,32 @@ def run_bot(config: dict) -> None:
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
-    escaped_positions = [re.escape(pos) for pos in AVAILABLE_POSITIONS]
-    position_pattern = '^(' + '|'.join(escaped_positions) + ')$'
-
     find_replacement_conv = ConversationHandler(
         entry_points=[MessageHandler(Filters.regex('^Знайти заміну$'), find_replacement_start)],
         states={
             ASK_DATE: [MessageHandler(Filters.text & ~Filters.command, ask_date_handler)],
-            ASK_POSITION: [CallbackQueryHandler(ask_position_handler, pattern=position_pattern)],
-            ASK_SHOP: [CallbackQueryHandler(ask_shop_handler)],
+            ASK_POSITION: [CallbackQueryHandler(ask_position_handler, pattern=r'^(?!cancel_replacement$).*')],
+            ASK_SHOP: [CallbackQueryHandler(ask_shop_handler, pattern=r'^(?!cancel_replacement$).*')],
+        },
+        fallbacks=[CommandHandler('cancel', cancel), CallbackQueryHandler(cancel, pattern='^cancel_replacement$')],
+    )
+
+    dp.add_handler(CommandHandler("start", start, filters=Filters.chat_type.private))
+    dp.add_handler(find_replacement_conv)
+    dp.add_handler(add_manager_conv)
+
+    employee_conv = ConversationHandler(
+        entry_points=[MessageHandler(Filters.regex('^Працівники$'), employees_menu_start)],
+        states={
+            EMPLOYEE_MENU: [CallbackQueryHandler(employee_menu_handler)],
+            ADD_EMPLOYEE_NAME: [MessageHandler(Filters.text & ~Filters.command, ask_employee_name_handler)],
+            ADD_EMPLOYEE_ID: [MessageHandler(Filters.text & ~Filters.command, ask_employee_id_handler)],
+            DELETE_EMPLOYEE_ID: [MessageHandler(Filters.text & ~Filters.command, delete_employee_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
+    dp.add_handler(employee_conv)
 
-    dp.add_handler(CommandHandler("start", start, filters=Filters.private))
-    dp.add_handler(find_replacement_conv)
-    dp.add_handler(add_manager_conv)
     dp.add_handler(CallbackQueryHandler(take_replacement_handler, pattern=r'^take_\d+$'))
     dp.add_handler(MessageHandler(Filters.regex('^Надіслати таблицю$'), send_report_handler))
     dp.add_handler(MessageHandler(Filters.regex('^Видалити керівника$'), remove_manager_menu))

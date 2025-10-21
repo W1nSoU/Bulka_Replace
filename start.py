@@ -5,7 +5,7 @@ import time
 import logging
 import warnings
 from config import CITIES_CONFIG, DEVELOPER_IDS
-from database import add_user, init_db
+from database import add_user, init_db, init_employees_db
 
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -33,8 +33,10 @@ def bootstrap_and_run(city_config: dict):
         return
 
     db_path = city_config['db_path']
+    employees_db_path = city_config['employees_db_path']
     try:
         init_db(db_path)
+        init_employees_db(employees_db_path)
         for dev_id in DEVELOPER_IDS:
             add_user(db_path, dev_id, 'developer')
         print(f"База даних {city_name} | Status | - OK")

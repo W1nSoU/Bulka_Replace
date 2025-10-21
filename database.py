@@ -151,6 +151,57 @@ def take_replacement(db_path: str, replacement_id: int, worker_id: int, worker_f
     con.commit()
     con.close()
 
+def init_employees_db(db_path: str):
+    """Ініціалізує базу даних працівників."""
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS employees (
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT NOT NULL
+        )
+    ''')
+    con.commit()
+    con.close()
+
+def add_employee(db_path: str, user_id: int, full_name: str):
+    """Додає нового працівника."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("INSERT OR REPLACE INTO employees (user_id, full_name) VALUES (?, ?)", (user_id, full_name))
+    con.commit()
+    con.close()
+
+def delete_employee(db_path: str, user_id: int):
+    """Видаляє працівника за його ID."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("DELETE FROM employees WHERE user_id = ?", (user_id,))
+    con.commit()
+    con.close()
+
+def get_employee(db_path: str, user_id: int) -> dict | None:
+    """Отримує дані працівника за його ID."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("SELECT user_id, full_name FROM employees WHERE user_id = ?", (user_id,))
+    employee = cur.fetchone()
+    con.close()
+    if employee:
+        return {"user_id": employee[0], "full_name": employee[1]}
+    return None
+
+def get_all_employees(db_path: str) -> list:
+    """Повертає список усіх працівників."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("SELECT user_id, full_name FROM employees ORDER BY full_name")
+    employees = cur.fetchall()
+    con.close()
+    return [{"user_id": emp[0], "full_name": emp[1]} for emp in employees]
+
+
 if __name__ == '__main__':
     DB_FILE_EXAMPLE = "bulka_example.db"
     init_db(DB_FILE_EXAMPLE)
