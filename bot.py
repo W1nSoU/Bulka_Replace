@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
@@ -288,6 +289,7 @@ def remove_manager_menu(update: Update, context: CallbackContext) -> None:
         button_text = f"❌ {display_name}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"delete_manager_{m['user_id']}")])
 
+    keyboard.append([InlineKeyboardButton("🔙 Скасувати", callback_data="cancel_deletion")])
     update.message.reply_text("➖ **Видалення керівника**\n\nОберіть зі списку, кого потрібно видалити:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 def confirm_delete_manager(update: Update, context: CallbackContext) -> None:
@@ -304,6 +306,12 @@ def confirm_delete_manager(update: Update, context: CallbackContext) -> None:
         return
     keyboard = [[InlineKeyboardButton(f"❌ {m['username']} (ID: {m['user_id']})", callback_data=f"delete_manager_{m['user_id']}")] for m in managers]
     query.message.reply_text("Оберіть наступного для видалення або поверніться в головне меню.", reply_markup=InlineKeyboardMarkup(keyboard))
+
+def cancel_deletion_handler(update: Update, context: CallbackContext) -> None:
+    """Обробляє натискання кнопки скасування у меню видалення."""
+    query = update.callback_query
+    query.answer()
+    query.edit_message_text("👌 **Дію скасовано.**\n\nВи повернулись у головне меню.", parse_mode='Markdown')
 
 def scheduled_report_task(context: CallbackContext) -> None:
     config = context.bot_data['config']
@@ -323,6 +331,7 @@ def scheduled_report_task(context: CallbackContext) -> None:
                 try:
                     with open(filepath, 'rb') as doc:
                         context.bot.send_document(dev['user_id'], document=doc, filename=filename, caption=caption)
+                        time.sleep(2)
                 except Exception as e:
                     logger.error(f"Не вдалося надіслати звіт розробнику {dev['user_id']} ({reports_dir}): {e}")
             os.remove(filepath)
@@ -503,6 +512,7 @@ def run_bot(config: dict) -> None:
     dp.add_handler(MessageHandler(Filters.regex('^Надіслати таблицю$'), send_report_handler))
     dp.add_handler(MessageHandler(Filters.regex('^Видалити керівника$'), remove_manager_menu))
     dp.add_handler(CallbackQueryHandler(confirm_delete_manager, pattern=r'^delete_manager_\d+$'))
+    dp.add_handler(CallbackQueryHandler(cancel_deletion_handler, pattern=r'^cancel_deletion$'))
     dp.add_handler(CommandHandler("cancel", cancel))
 
     logger.info(f"Бот для '{config['city_name']}' запускається...")
