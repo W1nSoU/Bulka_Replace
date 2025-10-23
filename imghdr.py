@@ -18,14 +18,18 @@ def what(file, h=None):
          read from.
     """
     f = None
+    location = None
     try:
         if h is None:
             if isinstance(file, (str, PathLike)):
                 f = open(file, 'rb')
                 h = f
             else:
-                location = file.tell()
                 h = file
+        try:
+            location = h.tell()
+        except (AttributeError, OSError):
+            location = None
         h.seek(0)
         try:
             for tf in tests:
@@ -33,7 +37,8 @@ def what(file, h=None):
                 if res:
                     return res
         finally:
-            h.seek(location)
+            if location is not None:
+                h.seek(location)
     finally:
         if f:
             f.close()

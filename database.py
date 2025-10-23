@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 import sqlite3
 import os
+from datetime import datetime
 
 def init_db(db_path: str):
     """Ініціалізує базу даних, створює таблиці та виконує міграцію, якщо потрібно."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     con = sqlite3.connect(db_path)
     cur = con.cursor()
+    cur.execute("PRAGMA foreign_keys = ON")
 
     
     cur.execute('''
@@ -30,6 +32,14 @@ def init_db(db_path: str):
         )
     ''')
 
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS replacement_meta (
+            replacement_id INTEGER PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (replacement_id) REFERENCES replacements (id) ON DELETE CASCADE
+        )
+    ''')
+
     cur.execute("PRAGMA table_info(replacements)")
     columns = [column[1] for column in cur.fetchall()]
     
@@ -40,6 +50,11 @@ def init_db(db_path: str):
     if 'replacement_worker_username' not in columns:
         print("Виконую міграцію: додаю колонку 'replacement_worker_username'...")
         cur.execute("ALTER TABLE replacements ADD COLUMN replacement_worker_username TEXT")
+
+    cur.execute("""
+        INSERT OR IGNORE INTO replacement_meta (replacement_id, created_at)
+        SELECT id, datetime('now') FROM replacements
+    """)
 
     con.commit()
     con.close()
@@ -97,9 +112,12 @@ def get_user_by_role(db_path: str, role: str) -> list:
 def add_replacement(db_path: str, manager_id: int, manager_username: str, request_date: str, position: str, shop: str) -> int:
     con = sqlite3.connect(db_path)
     cur = con.cursor()
+    cur.execute("PRAGMA foreign_keys = ON")
     cur.execute("INSERT INTO replacements (manager_id, manager_username, request_date, position, shop) VALUES (?, ?, ?, ?, ?)", (manager_id, manager_username, request_date, position, shop))
-    con.commit()
     replacement_id = cur.lastrowid
+    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cur.execute("INSERT OR REPLACE INTO replacement_meta (replacement_id, created_at) VALUES (?, ?)", (replacement_id, created_at))
+    con.commit()
     con.close()
     return replacement_id
 
@@ -150,6 +168,39 @@ def take_replacement(db_path: str, replacement_id: int, worker_id: int, worker_f
     """, (worker_id, worker_full_name, worker_username, replacement_id))
     con.commit()
     con.close()
+
+def expire_replacement(db_path: str, replacement_id: int):
+    """Позначає заявку як прострочену."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("UPDATE replacements SET status = 'expired' WHERE id = ?", (replacement_id,))
+    con.commit()
+    con.close()
+
+def get_pending_replacements_older_than(db_path: str, cutoff_timestamp: str):
+    """Повертає всі pending-заявки, створені раніше за cutoff_timestamp."""
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("""
+        SELECT r.id, r.manager_username, r.request_date, r.position, r.shop, r.message_id, r.chat_id
+        FROM replacements r
+        JOIN replacement_meta m ON r.id = m.replacement_id
+        WHERE r.status = 'pending' AND datetime(m.created_at) <= datetime(?)
+    """, (cutoff_timestamp,))
+    rows = cur.fetchall()
+    con.close()
+    return [
+        {
+            "id": row[0],
+            "manager_username": row[1],
+            "request_date": row[2],
+            "position": row[3],
+            "shop": row[4],
+            "message_id": row[5],
+            "chat_id": row[6],
+        }
+        for row in rows
+    ]
 
 def init_employees_db(db_path: str):
     """Ініціалізує базу даних працівників."""

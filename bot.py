@@ -16,7 +16,7 @@ from telegram.ext import (
     Filters,
     CallbackQueryHandler,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 
 import database as db
 import excel
@@ -63,13 +63,29 @@ def cancel(update: Update, context: CallbackContext) -> int:
     config = context.bot_data['config']
     db_path = config['db_path']
     user = update.effective_user
-    if not user: return ConversationHandler.END
+    if not user:
+        return ConversationHandler.END
 
     logger.info(f"Користувач {user.first_name} скасував розмову.")
     context.user_data.clear()
     user_info = db.get_user(db_path, user.id)
-    if user_info:
-        update.message.reply_text("👌 Добре, дію скасовано. Ви повернулись у головне меню.", reply_markup=get_main_keyboard(user_info['role']))
+
+    query = update.callback_query
+    if query:
+        query.answer()
+        if query.message:
+            query.edit_message_text("👌 Добре, дію скасовано.")
+        if user_info:
+            context.bot.send_message(
+                chat_id=user.id,
+                text="Ви повернулись у головне меню.",
+                reply_markup=get_main_keyboard(user_info['role'])
+            )
+    elif update.message and user_info:
+        update.message.reply_text(
+            "👌 Добре, дію скасовано. Ви повернулись у головне меню.",
+            reply_markup=get_main_keyboard(user_info['role'])
+        )
     return ConversationHandler.END
 
 def find_replacement_start(update: Update, context: CallbackContext) -> int:
@@ -208,7 +224,8 @@ def take_replacement_handler(update: Update, context: CallbackContext) -> None:
         db.take_replacement(db_path, repl_id, user.id, worker_full_name, user.username)
 
         
-        mention = f"@{user.username.replace('_', '\\_')}" if user.username else f"[{worker_full_name}](tg://user?id={user.id})"
+        escaped_username = user.username.replace('_', r'\_') if user.username else None
+        mention = f"@{escaped_username}" if escaped_username else f"[{worker_full_name}](tg://user?id={user.id})"
 
         orig_msg_text = query.message.text
         details_part = orig_msg_text.split("📋 Деталі:")[1].split("💡 Натисніть")[0].strip()
@@ -352,8 +369,70 @@ def scheduled_report_task(context: CallbackContext) -> None:
         caption = f"📊 Щомісячний звіт ({city_name})\n\nОсь повний звіт по замінах за {month_name}."
         send_and_delete(filepath, caption)
 
+def expire_pending_replacements(context: CallbackContext) -> None:
+    """Автоматично завершує заявки, на які не відповіли протягом 48 годин."""
+    config = context.job.context if context.job else None
+    if not config:
+        logger.warning("Планувальник прострочених заявок: відсутні налаштування міста.")
+        return
+
+    db_path = config['db_path']
+    reports_dir = config['reports_dir']
+    cutoff = (datetime.now() - timedelta(hours=48)).strftime('%Y-%m-%d %H:%M:%S')
+
+    stale_requests = db.get_pending_replacements_older_than(db_path, cutoff)
+    if not stale_requests:
+        return
+
+    for request in stale_requests:
+        repl_id = request['id']
+        logger.info(f"Заявка {repl_id} не взята понад 48 годин. Позначаю як прострочену.")
+        db.expire_replacement(db_path, repl_id)
+
+        chat_id = request.get('chat_id')
+        message_id = request.get('message_id')
+        expired_text = (
+            "⏰ **Заявку не закрито 48 годин**\n\n"
+            "📋 Деталі:\n"
+            f"🔹 Дата: {request['request_date']}\n"
+            f"🔹 Посада: {request['position']}\n"
+            f"🔹 Магазин: {request['shop']}\n\n"
+            "Статус: заміну не знайдено."
+        )
+        if chat_id and message_id:
+            try:
+                context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=expired_text,
+                    parse_mode='Markdown'
+                )
+            except BadRequest as e:
+                logger.warning(f"Не вдалося оновити повідомлення для заявки {repl_id}: {e}")
+
+        details = db.get_full_replacement_details(db_path, repl_id)
+        if details:
+            details['replacement_worker_full_name'] = ''
+            details['replacement_worker_username'] = ''
+            details['replacement_worker_id'] = None
+            excel.record_replacement_to_excel(reports_dir, details)
+        else:
+            logger.warning(f"Не знайдено деталі заявки {repl_id} для запису у звіт.")
+
 def employees_menu_start(update: Update, context: CallbackContext) -> int:
     """Показує головне меню управління працівниками."""
+    config = context.bot_data.get('config')
+    if not config:
+        update.message.reply_text("⚠️ Налаштування бота недоступні. Зверніться до розробника.")
+        return ConversationHandler.END
+
+    db_path = config['db_path']
+    user = update.effective_user
+    user_info = db.get_user(db_path, user.id)
+    if not user_info or user_info['role'] not in ('developer', 'manager'):
+        update.message.reply_text("❌ У вас немає прав для керування працівниками.")
+        return ConversationHandler.END
+
     keyboard = [
         [InlineKeyboardButton("➕ Додати працівника", callback_data="add_employee")],
         [InlineKeyboardButton("➖ Видалити працівника", callback_data="delete_employee")],
@@ -420,9 +499,10 @@ def show_employees_for_deletion(update: Update, context: CallbackContext) -> int
     config = context.bot_data['config']
     employees_db_path = config['employees_db_path']
     employees = db.get_all_employees(employees_db_path)
+    query = update.callback_query
     
     if not employees:
-        update.callback_query.edit_message_text("🤷‍♂️ Список порожній\n\nНаразі немає жодного працівника для видалення.")
+        query.edit_message_text("🤷‍♂️ Список порожній\n\nНаразі немає жодного працівника для видалення.")
         user = update.effective_user
         db_path = config['db_path']
         user_info = db.get_user(db_path, user.id)
@@ -433,9 +513,11 @@ def show_employees_for_deletion(update: Update, context: CallbackContext) -> int
     for emp in employees:
         message_text += f"• {emp['full_name']} (ID: `{emp['user_id']}`)\n"
     
-    message_text += "\nНадішліть ID працівника, якого потрібно видалити."
-    
-    update.callback_query.edit_message_text(message_text, parse_mode='Markdown')
+    message_text += "\nНадішліть ID працівника, якого потрібно видалити або скористайтесь `/cancel`."
+
+    cancel_keyboard = ReplyKeyboardMarkup([[KeyboardButton("/cancel")]], resize_keyboard=True)
+    query.edit_message_text("📋 Список працівників доступний нижче.")
+    query.message.reply_text(message_text, parse_mode='Markdown', reply_markup=cancel_keyboard)
     return DELETE_EMPLOYEE_ID
 
 def delete_employee_handler(update: Update, context: CallbackContext) -> int:
@@ -450,7 +532,8 @@ def delete_employee_handler(update: Update, context: CallbackContext) -> int:
             db.delete_employee(employees_db_path, user_id_to_delete)
             update.message.reply_text(f"✅ Працівника {employee['full_name']} (ID: {user_id_to_delete}) видалено!")
         else:
-            update.message.reply_text("❌ Працівника не знайдено\n\nПеревірте ID і спробуйте ще раз.")
+            cancel_keyboard = ReplyKeyboardMarkup([[KeyboardButton("/cancel")]], resize_keyboard=True)
+            update.message.reply_text("❌ Працівника не знайдено\n\nПеревірте ID і спробуйте ще раз.", reply_markup=cancel_keyboard)
             return DELETE_EMPLOYEE_ID
 
         user = update.effective_user
@@ -460,7 +543,8 @@ def delete_employee_handler(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
         
     except ValueError:
-        update.message.reply_text("❗️ Помилка ID\n\nUser ID має складатися лише з цифр. Спробуйте ще раз.")
+        cancel_keyboard = ReplyKeyboardMarkup([[KeyboardButton("/cancel")]], resize_keyboard=True)
+        update.message.reply_text("❗️ Помилка ID\n\nUser ID має складатися лише з цифр. Спробуйте ще раз.", reply_markup=cancel_keyboard)
         return DELETE_EMPLOYEE_ID
 
 
@@ -475,6 +559,13 @@ def run_bot(config: dict) -> None:
 
     job_queue = updater.job_queue
     job_queue.run_daily(scheduled_report_task, time=datetime.strptime("09:00", "%H:%M").time())
+    job_queue.run_repeating(
+        expire_pending_replacements,
+        interval=3600,
+        first=600,
+        context=config,
+        name="expire_pending_replacements"
+    )
 
     add_manager_conv = ConversationHandler(
         entry_points=[MessageHandler(Filters.regex('^Додати керівника$'), add_manager_start)],
@@ -497,7 +588,7 @@ def run_bot(config: dict) -> None:
     dp.add_handler(add_manager_conv)
 
     employee_conv = ConversationHandler(
-        entry_points=[MessageHandler(Filters.regex('^Працівники$'), employees_menu_start)],
+        entry_points=[MessageHandler(Filters.chat_type.private & Filters.regex('^Працівники$'), employees_menu_start)],
         states={
             EMPLOYEE_MENU: [CallbackQueryHandler(employee_menu_handler)],
             ADD_EMPLOYEE_NAME: [MessageHandler(Filters.text & ~Filters.command, ask_employee_name_handler)],
@@ -505,6 +596,7 @@ def run_bot(config: dict) -> None:
             DELETE_EMPLOYEE_ID: [MessageHandler(Filters.text & ~Filters.command, delete_employee_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        allow_reentry=True,
     )
     dp.add_handler(employee_conv)
 
@@ -514,12 +606,23 @@ def run_bot(config: dict) -> None:
     dp.add_handler(CallbackQueryHandler(confirm_delete_manager, pattern=r'^delete_manager_\d+$'))
     dp.add_handler(CallbackQueryHandler(cancel_deletion_handler, pattern=r'^cancel_deletion$'))
     dp.add_handler(CommandHandler("cancel", cancel))
+    dp.add_error_handler(error_handler)
 
     logger.info(f"Бот для '{config['city_name']}' запускається...")
     try:
-        updater.start_polling()
+        updater.start_polling(drop_pending_updates=True)
         print(f"Бот {config['city_name']} | Status | - OK")
         updater.idle()
     except Exception as e:
         logger.error(f"Помилка під час виконання `start_polling` для '{config['city_name']}': {e}")
         print(f"Бот {config['city_name']} | Status | - FAILED")
+def error_handler(update: object, context: CallbackContext) -> None:
+    """Логує виключення від бібліотеки telegram та намагається коректно відновитися після мережевих збоїв."""
+    error = context.error
+
+    if isinstance(error, NetworkError):
+        logger.warning("Тимчасова помилка мережі/Telegram API: %s. Повторюю наступну спробу через 5 секунд.", error)
+        time.sleep(5)
+        return
+
+    logger.exception("Неочікувана помилка в обробнику оновлень: %s", error)
