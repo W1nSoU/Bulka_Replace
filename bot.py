@@ -1,3 +1,32 @@
+def safe_reply(update: Update, context: CallbackContext, text: str, reply_markup=None, parse_mode=None):
+    """
+    Універсальна функція для відправки повідомлення користувачу незалежно від типу апдейту.
+    Перевіряє, чи це message, callback_query чи інший тип, і відправляє повідомлення у відповідному місці.
+    """
+    try:
+        if update is None:
+            return
+        if hasattr(update, "message") and update.message:
+            update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        elif hasattr(update, "callback_query") and update.callback_query:
+            query = update.callback_query
+            try:
+                query.answer()
+            except Exception:
+                pass
+            if query.message:
+                query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            else:
+                user_id = query.from_user.id if query.from_user else None
+                if user_id:
+                    context.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            # Якщо не message і не callback_query, намагаємось відправити напряму користувачу
+            user = update.effective_user if hasattr(update, "effective_user") else None
+            if user:
+                context.bot.send_message(chat_id=user.id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.warning(f"safe_reply: Не вдалося відправити повідомлення: {e}")
 # -*- coding: utf-8 -*-
 
 import logging
@@ -60,32 +89,23 @@ def start(update: Update, context: CallbackContext) -> None:
         update.message.reply_text(f"❌ **Доступ заборонено** ❌\n\nНа жаль, ваш ID (`{user.id}`) не знайдено у базі даних.\nЗверніться до адміністратора.", parse_mode='Markdown')
 
 def cancel(update: Update, context: CallbackContext) -> int:
-    config = context.bot_data['config']
-    db_path = config['db_path']
-    user = update.effective_user
-    if not user:
-        return ConversationHandler.END
-
-    logger.info(f"Користувач {user.first_name} скасував розмову.")
-    context.user_data.clear()
-    user_info = db.get_user(db_path, user.id)
-    keyboard = get_main_keyboard(user_info['role']) if user_info else None
-    text = "👌 Добре, дію скасовано. Ви повернулись у головне меню."
-
-    # універсальна обробка для всіх типів оновлень
-    if update.message:
-        update.message.reply_text(text, reply_markup=keyboard)
-    elif update.callback_query:
-        query = update.callback_query
-        query.answer()
-        if query.message:
-            try:
-                query.message.reply_text(text, reply_markup=keyboard)
-            except Exception as e:
-                logger.warning(f"Не вдалося відправити повідомлення після скасування: {e}")
+    """
+    Стабільна обробка скасування для будь-якого типу апдейту.
+    Використовує safe_reply, щоб уникнути помилки 'NoneType' object has no attribute 'reply_text'.
+    """
+    config = context.bot_data.get('config')
+    db_path = config['db_path'] if config and 'db_path' in config else None
+    user = update.effective_user if hasattr(update, 'effective_user') else None
+    if user and db_path:
+        user_info = db.get_user(db_path, user.id)
+        keyboard = get_main_keyboard(user_info['role']) if user_info else None
     else:
-        context.bot.send_message(chat_id=user.id, text=text, reply_markup=keyboard)
-
+        keyboard = None
+    logger.info(f"Користувач {user.first_name if user else 'невідомий'} скасував розмову.")
+    if hasattr(context, 'user_data') and context.user_data is not None:
+        context.user_data.clear()
+    text = "👌 Добре, дію скасовано. Ви повернулись у головне меню."
+    safe_reply(update, context, text, reply_markup=keyboard)
     return ConversationHandler.END
 
 def find_replacement_start(update: Update, context: CallbackContext) -> int:
@@ -125,9 +145,16 @@ def ask_date_handler(update: Update, context: CallbackContext) -> int:
         return ASK_DATE
 
 def ask_position_handler(update: Update, context: CallbackContext) -> int:
+    """
+    Обробник вибору посади. Перевіряє наявність query та даних.
+    """
     config = context.bot_data['config']
     shop_config = config['shop_config']
-    query = update.callback_query
+    query = getattr(update, 'callback_query', None)
+    if not query or not hasattr(query, 'data'):
+        # Якщо query або дані відсутні, безпечно завершуємо
+        safe_reply(update, context, "⚠️ Не вдалося обробити вибір посади. Спробуйте ще раз або /cancel.")
+        return ConversationHandler.END
     if query.data == "cancel_replacement":
         return cancel(update, context)
     query.answer()
@@ -139,15 +166,21 @@ def ask_position_handler(update: Update, context: CallbackContext) -> int:
     return ASK_SHOP
 
 def ask_shop_handler(update: Update, context: CallbackContext) -> int:
+    """
+    Обробник вибору магазину. Перевіряє наявність необхідних даних у context.user_data.
+    Уникає KeyError при відсутності replacement_date або replacement_position.
+    """
     config = context.bot_data['config']
     db_path = config['db_path']
     shop_config = config['shop_config']
-    query = update.callback_query
+    query = getattr(update, 'callback_query', None)
+    if not query or not hasattr(query, 'data'):
+        safe_reply(update, context, "⚠️ Не вдалося обробити вибір магазину. Спробуйте ще раз або /cancel.")
+        return ConversationHandler.END
     if query.data == "cancel_replacement":
         return cancel(update, context)
     user = update.effective_user
 
-    
     user_data = db.get_user(db_path, user.id)
     if not user_data or user_data['role'] not in ['manager', 'developer']:
         query.answer("Доступ заборонено.", show_alert=True)
@@ -155,18 +188,33 @@ def ask_shop_handler(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
     query.answer()
-        
+
     context.user_data['replacement_shop'] = query.data
     shop_name = context.user_data['replacement_shop']
 
-    repl_id = db.add_replacement(db_path, user.id, user.username or user.first_name, context.user_data['replacement_date'], context.user_data['replacement_position'], shop_name)
+    # Перевірка наявності replacement_date та replacement_position
+    replacement_date = context.user_data.get('replacement_date')
+    replacement_position = context.user_data.get('replacement_position')
+    if not replacement_date or not replacement_position:
+        safe_reply(update, context, "⚠️ Не вдалося знайти дату або посаду для заявки. Спробуйте створити заміну ще раз.", reply_markup=get_main_keyboard(user_data['role']))
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    repl_id = db.add_replacement(
+        db_path,
+        user.id,
+        user.username or user.first_name,
+        replacement_date,
+        replacement_position,
+        shop_name
+    )
 
     cfg = shop_config[shop_name]
     msg_text = (
         f"🔔 **ПОТРІБНА ЗАМІНА** 🔔\n\n"
         f"📋 Деталі:\n"
-        f"🔹 Дата: {context.user_data['replacement_date']}\n"
-        f"🔹 Посада: {context.user_data['replacement_position']}\n"
+        f"🔹 Дата: {replacement_date}\n"
+        f"🔹 Посада: {replacement_position}\n"
         f"🔹 Магазин: {shop_name}\n\n"
         f"💡 Натисніть кнопку нижче, щоб взяти цю заміну."
     )
@@ -198,10 +246,12 @@ def ask_shop_handler(update: Update, context: CallbackContext) -> int:
             )
         query.edit_message_text(error_text, parse_mode='Markdown')
 
-
     user_info = db.get_user(db_path, user.id)
     if user_info:
-        context.bot.send_message(user.id, "Ви повернулись в головне меню.", reply_markup=get_main_keyboard(user_info['role']))
+        try:
+            context.bot.send_message(user.id, "Ви повернулись в головне меню.", reply_markup=get_main_keyboard(user_info['role']))
+        except Exception:
+            pass
 
     context.user_data.clear()
     return ConversationHandler.END
