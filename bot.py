@@ -69,23 +69,23 @@ def cancel(update: Update, context: CallbackContext) -> int:
     logger.info(f"Користувач {user.first_name} скасував розмову.")
     context.user_data.clear()
     user_info = db.get_user(db_path, user.id)
+    keyboard = get_main_keyboard(user_info['role']) if user_info else None
+    text = "👌 Добре, дію скасовано. Ви повернулись у головне меню."
 
-    query = update.callback_query
-    if query:
+    # універсальна обробка для всіх типів оновлень
+    if update.message:
+        update.message.reply_text(text, reply_markup=keyboard)
+    elif update.callback_query:
+        query = update.callback_query
         query.answer()
         if query.message:
-            query.edit_message_text("👌 Добре, дію скасовано.")
-        if user_info:
-            context.bot.send_message(
-                chat_id=user.id,
-                text="Ви повернулись у головне меню.",
-                reply_markup=get_main_keyboard(user_info['role'])
-            )
-    elif update.message and user_info:
-        update.message.reply_text(
-            "👌 Добре, дію скасовано. Ви повернулись у головне меню.",
-            reply_markup=get_main_keyboard(user_info['role'])
-        )
+            try:
+                query.message.reply_text(text, reply_markup=keyboard)
+            except Exception as e:
+                logger.warning(f"Не вдалося відправити повідомлення після скасування: {e}")
+    else:
+        context.bot.send_message(chat_id=user.id, text=text, reply_markup=keyboard)
+
     return ConversationHandler.END
 
 def find_replacement_start(update: Update, context: CallbackContext) -> int:
