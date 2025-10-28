@@ -128,6 +128,8 @@ def ask_position_handler(update: Update, context: CallbackContext) -> int:
     config = context.bot_data['config']
     shop_config = config['shop_config']
     query = update.callback_query
+    if query.data == "cancel_replacement":
+        return cancel(update, context)
     query.answer()
 
     context.user_data['replacement_position'] = query.data
@@ -141,6 +143,8 @@ def ask_shop_handler(update: Update, context: CallbackContext) -> int:
     db_path = config['db_path']
     shop_config = config['shop_config']
     query = update.callback_query
+    if query.data == "cancel_replacement":
+        return cancel(update, context)
     user = update.effective_user
 
     

@@ -2,6 +2,7 @@
 import sqlite3
 import os
 from datetime import datetime
+from typing import Optional
 
 def init_db(db_path: str):
     """Ініціалізує базу даних, створює таблиці та виконує міграцію, якщо потрібно."""
@@ -137,7 +138,7 @@ def get_replacement(db_path: str, replacement_id: int):
     if data: return {"id": data[0], "status": data[1]}
     return None
 
-def get_full_replacement_details(db_path: str, replacement_id: int) -> dict | None:
+def get_full_replacement_details(db_path: str, replacement_id: int) -> Optional[dict]:
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.execute("""
@@ -155,7 +156,7 @@ def get_full_replacement_details(db_path: str, replacement_id: int) -> dict | No
         }
     return None
 
-def take_replacement(db_path: str, replacement_id: int, worker_id: int, worker_full_name: str, worker_username: str | None):
+def take_replacement(db_path: str, replacement_id: int, worker_id: int, worker_full_name: str, worker_username: Optional[str]):
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.execute("""
@@ -232,7 +233,7 @@ def delete_employee(db_path: str, user_id: int):
     con.commit()
     con.close()
 
-def get_employee(db_path: str, user_id: int) -> dict | None:
+def get_employee(db_path: str, user_id: int) -> Optional[dict]:
     """Отримує дані працівника за його ID."""
     con = sqlite3.connect(db_path)
     cur = con.cursor()
