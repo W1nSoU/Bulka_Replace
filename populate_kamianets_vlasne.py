@@ -3,7 +3,7 @@
 from typing import List, Tuple
 
 from config import CITIES_CONFIG
-from database import add_employee, init_employees_db
+from database import add_employee, delete_employee, init_employees_db
 
 
 # Напишіть список працівників тут у форматі: (ID, "Прізвище Ім'я")
@@ -79,6 +79,7 @@ def main() -> None:
     try:
         init_employees_db(db_path)
         for user_id, full_name in EMPLOYEES:
+            delete_employee(db_path, user_id)
             add_employee(db_path, user_id, full_name)
     except Exception as error:
         print(f"Невдача: {error}")
