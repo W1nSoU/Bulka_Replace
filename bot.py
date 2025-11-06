@@ -513,15 +513,39 @@ def show_employees_for_deletion(update: Update, context: CallbackContext) -> int
         update.effective_message.reply_text("Ви повернулись у головне меню.", reply_markup=get_main_keyboard(user_info['role']))
         return ConversationHandler.END
 
-    message_text = "👇 **Оберіть працівника для видалення** 👇\n\n"
-    for emp in employees:
-        message_text += f"• {emp['full_name']} (ID: `{emp['user_id']}`)\n"
-    
-    message_text += "\nНадішліть ID працівника, якого потрібно видалити або скористайтесь `/cancel`."
+    header = "👇 **Оберіть працівника для видалення** 👇\n\n"
+    lines = [f"• {emp['full_name']} (ID: `{emp['user_id']}`)\n" for emp in employees]
+    instructions = "\nНадішліть ID працівника, якого потрібно видалити або скористайтесь `/cancel`."
+    max_length = 3800
+
+    chunks = []
+    current = header
+    for line in lines:
+        if len(current) + len(line) > max_length:
+            chunks.append(current.rstrip())
+            current = ""
+        if not current:
+            current = ""
+        current += line
+    if current:
+        chunks.append(current.rstrip())
+
+    instructions_message = instructions.strip()
+    if chunks:
+        if len(chunks[-1]) + len(instructions) <= max_length:
+            chunks[-1] = chunks[-1] + instructions
+            instructions_message = None
 
     cancel_keyboard = ReplyKeyboardMarkup([[KeyboardButton("/cancel")]], resize_keyboard=True)
     query.edit_message_text("📋 Список працівників доступний нижче.")
-    query.message.reply_text(message_text, parse_mode='Markdown', reply_markup=cancel_keyboard)
+
+    for index, chunk in enumerate(chunks):
+        reply_markup = cancel_keyboard if index == 0 else None
+        query.message.reply_text(chunk, parse_mode='Markdown', reply_markup=reply_markup)
+
+    if instructions_message:
+        query.message.reply_text(instructions_message, parse_mode='Markdown', reply_markup=None)
+
     return DELETE_EMPLOYEE_ID
 
 def delete_employee_handler(update: Update, context: CallbackContext) -> int:
